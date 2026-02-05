@@ -13,6 +13,23 @@ Manager-first bug repro + triage system with Codex workers in tmux.
 2. Worker sessions (`w1`, `w2`, ...) are executors launched and supervised by manager.
 3. `orchestrator.run` is an optional compatibility launcher that starts manager in a tmux session.
 
+```mermaid
+flowchart TD
+    O["Orchestrator (launcher)"] --> M["Manager session (tmux)"]
+    M --> W1["Worker w1 (tmux)"]
+    M --> W2["Worker w2 (tmux)"]
+    M --> WN["Worker wn (tmux)"]
+
+    M --> T["Tmux supervisor"]
+    M --> WT["Git worktree manager"]
+    M --> S["Supervision loop"]
+    M --> A["Run artifacts"]
+
+    W1 --> A
+    W2 --> A
+    WN --> A
+```
+
 ## Manager (entrypoint)
 ```bash
 python3 -m orchestrator.manager \
