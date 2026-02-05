@@ -28,8 +28,7 @@ class ManagerConfig:
     issue_url: str
     repo_path: Path
     runs_root: Path
-    min_workers: int = 2
-    max_workers: int = 6
+    workers: int = 2
     timeout_sec: int = 300
     poll_interval_sec: int = 5
     repro_validation_runs: int = 5
@@ -52,6 +51,10 @@ class Manager:
         self.tmux = TmuxSupervisor(self.command_runner, cwd=config.repo_path)
         self.worktrees = WorktreeManager(self.command_runner, repo_path=config.repo_path)
         self.supervisor = SupervisionLoop(self.tmux, stall_timeout_sec=max(45, config.timeout_sec // 3))
+
+    @staticmethod
+    def _log(message: str) -> None:
+        print(message, flush=True)
 
     @property
     def manager_session_name(self) -> str:
@@ -115,13 +118,7 @@ class Manager:
         return decision
 
     def _worker_count_sequence(self) -> list[int]:
-        sequence = [self.config.min_workers]
-        for size in (4, 6):
-            if self.config.min_workers < size <= self.config.max_workers:
-                sequence.append(size)
-        if self.config.max_workers not in sequence:
-            sequence.append(self.config.max_workers)
-        return sorted(set(sequence))
+        return [max(1, self.config.workers)]
 
     def _launch_workers(self, role: str, count: int, issue_spec, minimal_repro: str | None = None) -> tuple[dict[str, dict[str, Any]], list[Path]]:
         worker_sessions: dict[str, dict[str, Any]] = {}
@@ -168,6 +165,7 @@ class Manager:
             worker_sessions[worker_id] = {
                 "session_name": session_name,
                 "role": role,
+                "status": "running",
                 "worktree_path": str(worktree_path),
                 "output_path": str(output_path),
                 "script_path": str(script_path),
@@ -176,7 +174,30 @@ class Manager:
 
         return worker_sessions, output_paths
 
-    def _wait_for_workers(self, worker_sessions: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _set_worker_status(
+        self,
+        worker_sessions: dict[str, dict[str, Any]],
+        worker_id: str,
+        status: str,
+        phase: str,
+    ) -> None:
+        previous = str(worker_sessions[worker_id].get("status", "unknown"))
+        worker_sessions[worker_id]["status"] = status
+        if previous != status:
+            self._log(f"[{phase}] worker {worker_id}: {previous} -> {status}")
+
+    @staticmethod
+    def _worker_status_counts(worker_sessions: dict[str, dict[str, Any]]) -> dict[str, int]:
+        counts = {"running": 0, "finished": 0, "failed": 0, "timeout": 0, "other": 0}
+        for metadata in worker_sessions.values():
+            status = str(metadata.get("status", "other"))
+            if status in counts:
+                counts[status] += 1
+            else:
+                counts["other"] += 1
+        return counts
+
+    def _wait_for_workers(self, worker_sessions: dict[str, dict[str, Any]], phase: str) -> dict[str, dict[str, Any]]:
         watches: dict[str, WorkerWatchState] = {}
         for worker_id, metadata in worker_sessions.items():
             watches[worker_id] = WorkerWatchState(
@@ -185,6 +206,7 @@ class Manager:
             )
 
         start = time.time()
+        previous_counts: dict[str, int] | None = None
         while True:
             active = []
             for worker_id, watch in watches.items():
@@ -192,14 +214,22 @@ class Manager:
                 watches[worker_id] = watch
 
                 if watch.failed:
-                    worker_sessions[worker_id]["status"] = "failed"
+                    self._set_worker_status(worker_sessions, worker_id, "failed", phase)
                     continue
 
                 session_exists = self.tmux.session_exists(watch.session_name)
                 if session_exists:
+                    self._set_worker_status(worker_sessions, worker_id, "running", phase)
                     active.append(worker_id)
                 else:
-                    worker_sessions[worker_id]["status"] = "finished"
+                    self._set_worker_status(worker_sessions, worker_id, "finished", phase)
+
+            counts = self._worker_status_counts(worker_sessions)
+            if previous_counts != counts:
+                self._log(
+                    f"[{phase}] workers running={counts['running']} finished={counts['finished']} failed={counts['failed']} timeout={counts['timeout']}"
+                )
+                previous_counts = counts
 
             if not active:
                 break
@@ -207,7 +237,7 @@ class Manager:
                 for worker_id in active:
                     session = watches[worker_id].session_name
                     self.tmux.kill_session(session)
-                    worker_sessions[worker_id]["status"] = "timeout"
+                    self._set_worker_status(worker_sessions, worker_id, "timeout", phase)
                 break
             time.sleep(self.config.poll_interval_sec)
 
@@ -394,6 +424,87 @@ class Manager:
             return False
         return abs(top_scores[0] - top_scores[1]) <= 0.15
 
+    @staticmethod
+    def _format_usage(label: str, usage: dict[str, Any] | None) -> str:
+        usage = usage or {}
+        return (
+            f"{label}: input={int(usage.get('input_tokens', 0) or 0)} "
+            f"cached={int(usage.get('cached_input_tokens', 0) or 0)} "
+            f"output={int(usage.get('output_tokens', 0) or 0)} "
+            f"turns={int(usage.get('turns', 0) or 0)}"
+        )
+
+    @staticmethod
+    def _format_seconds(value: Any) -> str:
+        try:
+            return f"{float(value):.3f}s"
+        except (TypeError, ValueError):
+            return "n/a"
+
+    @classmethod
+    def format_human_summary(
+        cls,
+        payload: dict[str, Any],
+        run_id: str,
+        issue_url: str,
+        run_dir: Path,
+    ) -> str:
+        lines = [
+            "mminions manager result",
+            f"run_id: {run_id}",
+            f"issue: {issue_url}",
+            f"status: {payload.get('status', 'unknown')}",
+            f"selected_repro_candidate: {payload.get('selected_repro_candidate_id') or 'none'}",
+            f"artifacts_dir: {run_dir}",
+            "",
+            "rationale:",
+            str(payload.get("rationale", "")),
+        ]
+
+        top_hypotheses = payload.get("top_hypotheses", [])
+        lines.append("")
+        lines.append("top_hypotheses:")
+        if isinstance(top_hypotheses, list) and top_hypotheses:
+            for idx, hypothesis in enumerate(top_hypotheses, start=1):
+                lines.append(f"{idx}. {hypothesis}")
+        else:
+            lines.append("1. none")
+
+        next_fix_targets = payload.get("next_fix_targets", [])
+        lines.append("")
+        lines.append("next_fix_targets:")
+        if isinstance(next_fix_targets, list) and next_fix_targets:
+            for idx, target in enumerate(next_fix_targets, start=1):
+                lines.append(f"{idx}. {target}")
+        else:
+            lines.append("1. none")
+
+        diagnostics = payload.get("diagnostics", [])
+        if isinstance(diagnostics, list) and diagnostics:
+            lines.append("")
+            lines.append("diagnostics:")
+            for idx, diagnostic in enumerate(diagnostics, start=1):
+                lines.append(f"{idx}. {diagnostic}")
+
+        metrics = payload.get("metrics", {}) if isinstance(payload.get("metrics"), dict) else {}
+        timing = metrics.get("timing_sec", {}) if isinstance(metrics.get("timing_sec"), dict) else {}
+        tokens = metrics.get("tokens", {}) if isinstance(metrics.get("tokens"), dict) else {}
+
+        lines.append("")
+        lines.append("timing:")
+        if timing:
+            for key in sorted(timing):
+                lines.append(f"- {key}: {cls._format_seconds(timing.get(key))}")
+        else:
+            lines.append("- unavailable")
+
+        lines.append("")
+        lines.append("tokens:")
+        lines.append(f"- {cls._format_usage('workers', tokens.get('workers') if isinstance(tokens, dict) else {})}")
+        lines.append(f"- {cls._format_usage('manager', tokens.get('manager') if isinstance(tokens, dict) else {})}")
+        lines.append(f"- {cls._format_usage('total', tokens.get('total') if isinstance(tokens, dict) else {})}")
+        return "\n".join(lines)
+
     def run(self) -> RunDecision:
         diagnostics: list[str] = []
         run_started = time.monotonic()
@@ -409,6 +520,10 @@ class Manager:
                 merged_extra.update(extra)
             return self._finalize(decision, extra=merged_extra)
 
+        self._log(f"[manager] run={self.config.run_id} issue={self.config.issue_url}")
+        self._log(f"[manager] artifacts={self.paths.run_dir}")
+
+        self._log("[preflight] starting")
         preflight_started = time.monotonic()
         preflight_result = run_preflight(self.command_runner, self.config.repo_path)
         mark_timing("preflight", preflight_started)
@@ -419,6 +534,7 @@ class Manager:
                 "diagnostics": [],
             },
         )
+        self._log(f"[preflight] {'passed' if preflight_result.passed else 'failed'} in {self._format_seconds(timing_sec.get('preflight'))}")
         if not preflight_result.passed:
             diagnostics.extend([f"preflight failed: {check.name} -> {check.details}" for check in preflight_result.checks if not check.passed])
             decision = RunDecision(
@@ -431,6 +547,7 @@ class Manager:
             )
             return finalize_with_metrics(decision)
 
+        self._log("[issue] parsing and normalizing issue spec")
         issue_parse_started = time.monotonic()
         try:
             issue_payload = fetch_issue_json(self.config.issue_url)
@@ -449,6 +566,7 @@ class Manager:
 
         write_issue_spec(issue_spec=issue_spec, path=self.paths.issue_json)
         mark_timing("issue_parse", issue_parse_started)
+        self._log(f"[issue] parsed in {self._format_seconds(timing_sec.get('issue_parse'))}")
 
         if issue_spec.status != "ok":
             decision = RunDecision(
@@ -461,6 +579,7 @@ class Manager:
             )
             return finalize_with_metrics(decision)
 
+        self._log("[validation] preparing uv validation environment")
         validation_env_started = time.monotonic()
         validation_python, validation_error = self._prepare_validation_env()
         mark_timing("validation_env_setup", validation_env_started)
@@ -474,23 +593,28 @@ class Manager:
                 diagnostics=[validation_error or "failed to prepare uv validation env"],
             )
             return finalize_with_metrics(decision)
+        self._log(f"[validation] ready in {self._format_seconds(timing_sec.get('validation_env_setup'))} ({validation_python})")
 
         accepted_candidates: list[ReproCandidate] = []
         worker_sessions: dict[str, dict[str, Any]] = {}
         repro_output_paths: list[Path] = []
 
+        self._log("[repro] launching workers")
         repro_phase_started = time.monotonic()
         for worker_count in self._worker_count_sequence():
+            self._log(f"[repro] worker wave size={worker_count}")
             worker_sessions, repro_output_paths = self._launch_workers(
                 role="REPRO_BUILDER",
                 count=worker_count,
                 issue_spec=issue_spec,
             )
             self._write_sessions(worker_sessions)
-            worker_sessions = self._wait_for_workers(worker_sessions)
+            worker_sessions = self._wait_for_workers(worker_sessions, phase="repro")
             self._write_sessions(worker_sessions)
             accepted_candidates = self._validate_candidates(issue_spec, repro_output_paths)
+            self._log(f"[repro] parsed_candidates={len(accepted_candidates)}")
             if choose_best_candidate(accepted_candidates, issue_spec):
+                self._log("[repro] found deterministic candidate")
                 break
 
         best = choose_best_candidate(accepted_candidates, issue_spec)
@@ -508,8 +632,10 @@ class Manager:
                 diagnostics=diagnostics,
             )
             mark_timing("repro_phase", repro_phase_started)
+            self._log(f"[repro] failed in {self._format_seconds(timing_sec.get('repro_phase'))}")
             return finalize_with_metrics(decision)
 
+        self._log("[repro] minimizing candidate with manager semantic reducer")
         semantic_output_path = self.paths.repro_dir / "semantic_reduce_output.txt"
         semantic_telemetry_path = self.paths.telemetry_dir / "manager-semantic-reduce.jsonl"
         minimal_repro_path = self.artifacts.minimal_repro_path(best.file_extension)
@@ -527,6 +653,7 @@ class Manager:
             timeout_sec=min(60, self.config.timeout_sec),
         )
         mark_timing("repro_phase", repro_phase_started)
+        self._log(f"[repro] completed in {self._format_seconds(timing_sec.get('repro_phase'))}")
 
         if not minimized.validation or not minimized.validation.passed:
             minimized = best
@@ -541,8 +668,10 @@ class Manager:
         triage_sessions: dict[str, dict[str, Any]] = {}
         triage_hypotheses = []
 
+        self._log("[triage] launching workers")
         triage_phase_started = time.monotonic()
         for worker_count in self._worker_count_sequence():
+            self._log(f"[triage] worker wave size={worker_count}")
             triage_sessions, triage_output_paths = self._launch_workers(
                 role="TRIAGER",
                 count=worker_count,
@@ -550,7 +679,7 @@ class Manager:
                 minimal_repro=minimized.script,
             )
             self._write_sessions(triage_sessions)
-            triage_sessions = self._wait_for_workers(triage_sessions)
+            triage_sessions = self._wait_for_workers(triage_sessions, phase="triage")
             self._write_sessions(triage_sessions)
 
             triage_hypotheses = []
@@ -563,13 +692,14 @@ class Manager:
                 repro_text=minimized.script,
             )
             disagreement_high = self._triage_disagreement_high(ranked)
-            if ranked and (not disagreement_high or worker_count >= self.config.max_workers):
+            if ranked and (not disagreement_high or worker_count >= self.config.workers):
                 triage_hypotheses = ranked
                 break
-            if not ranked and worker_count >= self.config.max_workers:
+            if not ranked and worker_count >= self.config.workers:
                 triage_hypotheses = ranked
                 break
         mark_timing("triage_phase", triage_phase_started)
+        self._log(f"[triage] completed in {self._format_seconds(timing_sec.get('triage_phase'))}")
 
         top = top_hypotheses(triage_hypotheses, limit=3)
 
@@ -594,6 +724,7 @@ class Manager:
             next_fix_targets=next_fix_targets,
             diagnostics=diagnostics,
         )
+        self._log("[manager] run complete")
         return finalize_with_metrics(
             decision,
             extra={
@@ -614,8 +745,7 @@ def build_arg_parser(defaults: ManagerDefaults) -> argparse.ArgumentParser:
     parser.add_argument("--issue-url", required=True)
     parser.add_argument("--repo-path", default=str(defaults.repo_path))
     parser.add_argument("--runs-root", default=str(defaults.runs_root))
-    parser.add_argument("--min-workers", type=int, default=defaults.min_workers)
-    parser.add_argument("--max-workers", type=int, default=defaults.max_workers)
+    parser.add_argument("--workers", type=int, default=defaults.workers)
     parser.add_argument("--timeout-sec", type=int, default=defaults.timeout_sec)
     parser.add_argument("--poll-interval-sec", type=int, default=defaults.poll_interval_sec)
     parser.add_argument("--repro-validation-runs", type=int, default=defaults.repro_validation_runs)
@@ -639,8 +769,7 @@ def main() -> int:
         issue_url=args.issue_url,
         repo_path=Path(args.repo_path).resolve(),
         runs_root=Path(args.runs_root).resolve(),
-        min_workers=args.min_workers,
-        max_workers=args.max_workers,
+        workers=max(1, min(6, args.workers)),
         timeout_sec=args.timeout_sec,
         poll_interval_sec=args.poll_interval_sec,
         repro_validation_runs=max(1, args.repro_validation_runs),
@@ -653,7 +782,13 @@ def main() -> int:
     manager = Manager(config)
     decision = manager.run()
     enriched_payload = manager.artifacts.read_json(manager.paths.decision_json)
-    print(json.dumps(enriched_payload, indent=2))
+    summary = Manager.format_human_summary(
+        enriched_payload,
+        run_id=config.run_id,
+        issue_url=config.issue_url,
+        run_dir=manager.paths.run_dir,
+    )
+    print(summary)
     return 0 if decision.status == "ok" else 2
 
 

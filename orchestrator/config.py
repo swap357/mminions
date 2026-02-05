@@ -23,8 +23,7 @@ ENV_CONFIG_PATH = "MMINIONS_CONFIG"
 class ManagerDefaults:
     repo_path: Path
     runs_root: Path
-    min_workers: int = 1
-    max_workers: int = 2
+    workers: int = 2
     timeout_sec: int = 300
     poll_interval_sec: int = 5
     repro_validation_runs: int = 5
@@ -82,8 +81,13 @@ def load_manager_defaults(config_path: str | None = None, cwd: Path | None = Non
 
     repo_path = _resolve_path(manager_payload.get("repo_path"), root, _default_repo_path(root))
     runs_root = _resolve_path(manager_payload.get("runs_root"), root, root / "runs")
-    min_workers = max(2, _as_int(manager_payload, "min_workers", 2))
-    max_workers = min(6, max(2, _as_int(manager_payload, "max_workers", 6)))
+    workers_value = manager_payload.get("workers")
+    if workers_value is None:
+        legacy_min = _as_int(manager_payload, "min_workers", 2)
+        legacy_max = _as_int(manager_payload, "max_workers", legacy_min)
+        workers = max(1, min(6, max(legacy_min, legacy_max)))
+    else:
+        workers = max(1, min(6, _as_int(manager_payload, "workers", 2)))
     timeout_sec = max(60, _as_int(manager_payload, "timeout_sec", 300))
     poll_interval_sec = max(1, _as_int(manager_payload, "poll_interval_sec", 5))
     repro_validation_runs = max(1, _as_int(manager_payload, "repro_validation_runs", 5))
@@ -95,8 +99,7 @@ def load_manager_defaults(config_path: str | None = None, cwd: Path | None = Non
     return ManagerDefaults(
         repo_path=repo_path,
         runs_root=runs_root,
-        min_workers=min_workers,
-        max_workers=max_workers,
+        workers=workers,
         timeout_sec=timeout_sec,
         poll_interval_sec=poll_interval_sec,
         repro_validation_runs=repro_validation_runs,

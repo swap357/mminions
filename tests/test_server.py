@@ -91,6 +91,24 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(result["run_id"], "run-123")
             self.assertIn("manager_session", result)
 
+    def test_launch_run_uses_workers_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            captured = {}
+
+            def fake_launcher(config):
+                captured["workers"] = config.workers
+                return "run-123", root / "run-123" / "run_done.json"
+
+            payload = {
+                "issue_url": "https://example.com",
+                "repo_path": "/tmp/repo",
+                "workers": 4,
+            }
+            launch_run(payload, root, launcher=fake_launcher)
+
+            self.assertEqual(captured["workers"], 4)
+
     def test_stop_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

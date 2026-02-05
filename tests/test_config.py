@@ -13,7 +13,7 @@ class ConfigTests(unittest.TestCase):
             root = Path(temp_dir)
             defaults = load_manager_defaults(cwd=root)
             self.assertEqual(defaults.runs_root, (root / "runs").resolve())
-            self.assertEqual(defaults.min_workers, 2)
+            self.assertEqual(defaults.workers, 2)
             self.assertEqual(defaults.repro_min_matches, 1)
             self.assertEqual(defaults.validation_python_version, "3.12")
             self.assertEqual(defaults.worker_model, "")
@@ -28,8 +28,7 @@ class ConfigTests(unittest.TestCase):
 [manager]
 repo_path = "repo"
 runs_root = "artifacts"
-min_workers = 3
-max_workers = 5
+workers = 4
 timeout_sec = 123
 poll_interval_sec = 4
 repro_validation_runs = 7
@@ -46,8 +45,7 @@ manager_model = "reasoning-model"
 
             self.assertEqual(defaults.repo_path, (root / "repo").resolve())
             self.assertEqual(defaults.runs_root, (root / "artifacts").resolve())
-            self.assertEqual(defaults.min_workers, 3)
-            self.assertEqual(defaults.max_workers, 5)
+            self.assertEqual(defaults.workers, 4)
             self.assertEqual(defaults.timeout_sec, 123)
             self.assertEqual(defaults.poll_interval_sec, 4)
             self.assertEqual(defaults.repro_validation_runs, 7)
@@ -55,6 +53,23 @@ manager_model = "reasoning-model"
             self.assertEqual(defaults.validation_python_version, "3.13")
             self.assertEqual(defaults.worker_model, "fast-model")
             self.assertEqual(defaults.manager_model, "reasoning-model")
+
+    def test_load_defaults_legacy_min_max_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cfg = root / "mminions.toml"
+            cfg.write_text(
+                """
+[manager]
+min_workers = 2
+max_workers = 5
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            defaults = load_manager_defaults(cwd=root)
+            self.assertEqual(defaults.workers, 5)
 
 
 if __name__ == "__main__":

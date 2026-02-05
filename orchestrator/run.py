@@ -16,8 +16,7 @@ class LauncherConfig:
     issue_url: str
     repo_path: Path
     runs_root: Path
-    min_workers: int
-    max_workers: int
+    workers: int
     timeout_sec: int
     repro_validation_runs: int
     repro_min_matches: int
@@ -51,8 +50,7 @@ def launch_manager(config: LauncherConfig) -> tuple[str, Path]:
         f"--issue-url {shlex.quote(config.issue_url)} "
         f"--repo-path {shlex.quote(str(config.repo_path.resolve()))} "
         f"--runs-root {shlex.quote(str(runs_root))} "
-        f"--min-workers {config.min_workers} "
-        f"--max-workers {config.max_workers} "
+        f"--workers {config.workers} "
         f"--timeout-sec {config.timeout_sec} "
         f"--repro-validation-runs {config.repro_validation_runs} "
         f"--repro-min-matches {config.repro_min_matches} "
@@ -87,8 +85,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--issue-url", required=True)
     parser.add_argument("--repo-path", required=True)
     parser.add_argument("--runs-root", default="runs")
-    parser.add_argument("--min-workers", type=int, default=2)
-    parser.add_argument("--max-workers", type=int, default=6)
+    parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--timeout-sec", type=int, default=300)
     parser.add_argument("--repro-validation-runs", type=int, default=5)
     parser.add_argument("--repro-min-matches", type=int, default=1)
@@ -105,8 +102,7 @@ def main() -> int:
         issue_url=args.issue_url,
         repo_path=Path(args.repo_path).resolve(),
         runs_root=Path(args.runs_root).resolve(),
-        min_workers=max(2, args.min_workers),
-        max_workers=min(6, max(2, args.max_workers)),
+        workers=max(1, min(6, args.workers)),
         timeout_sec=max(60, args.timeout_sec),
         repro_validation_runs=max(1, args.repro_validation_runs),
         repro_min_matches=max(1, min(args.repro_min_matches, max(1, args.repro_validation_runs))),

@@ -1,8 +1,7 @@
 [manager]
 repo_path = "projects/numpy"
 runs_root = "runs"
-min_workers = 2
-max_workers = 2
+workers = 2
 timeout_sec = 300
 poll_interval_sec = 2
 repro_validation_runs = 5

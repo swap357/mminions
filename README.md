@@ -33,6 +33,18 @@ flowchart TD
 ```
 
 ## Manager (entrypoint)
+GitHub issue run commands:
+```bash
+python3 -m orchestrator.manager \
+  --issue-url https://github.com/numpy/numpy/issues/30272
+```
+
+```bash
+python3 -m orchestrator.manager \
+  --issue-url https://github.com/numpy/numpy/issues/30272 \
+  --workers 2
+```
+
 Simple (uses defaults from `mminions.toml`):
 ```bash
 python3 -m orchestrator.manager \
@@ -46,8 +58,7 @@ python3 -m orchestrator.manager \
   --issue-url https://github.com/<owner>/<repo>/issues/<number> \
   --repo-path /absolute/path/to/repo \
   --runs-root /absolute/path/to/runs \
-  --min-workers 2 \
-  --max-workers 6 \
+  --workers 2 \
   --timeout-sec 300
 ```
 
@@ -59,9 +70,10 @@ Advanced configuration:
   - `manager_model` for manager-side semantic reduction (reasoning model recommended).
   - For ChatGPT Codex accounts, `gpt-5` and `gpt-5.2-codex` are supported. `gpt-5-mini` is not supported.
 
-Manager output includes run metrics:
-- `metrics.timing_sec` for phase and total durations.
-- `metrics.tokens` aggregated from Codex JSON telemetry (`workers`, `manager`, and `total`).
+Manager stdout behavior:
+- Streams phase progress and worker status transitions (`running`, `finished`, `failed`, `timeout`).
+- Prints a final human-readable summary with status, rationale, top hypotheses, next fix targets, and token/timing metrics.
+- Keeps machine-readable metrics in `runs/<run_id>/decision.json` under `metrics`.
 
 ## Optional launcher
 Use this only if you specifically want a wrapper that creates the manager tmux session for you.
@@ -70,8 +82,7 @@ python3 -m orchestrator.run \
   --issue-url https://github.com/<owner>/<repo>/issues/<number> \
   --repo-path /absolute/path/to/repo \
   --runs-root /absolute/path/to/runs \
-  --min-workers 2 \
-  --max-workers 6 \
+  --workers 2 \
   --timeout-sec 300
 ```
 
@@ -161,8 +172,7 @@ Request:
 {
   "issue_url": "https://github.com/<owner>/<repo>/issues/<number>",
   "repo_path": "/absolute/path/to/repo",
-  "min_workers": 2,
-  "max_workers": 6,
+  "workers": 2,
   "timeout_sec": 300
 }
 ```

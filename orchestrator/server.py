@@ -137,8 +137,13 @@ def launch_run(
     if not issue_url or not repo_path:
         raise ValueError("issue_url and repo_path are required")
 
-    min_workers = int(payload.get("min_workers", 2))
-    max_workers = int(payload.get("max_workers", 6))
+    workers_raw = payload.get("workers")
+    if workers_raw is None:
+        legacy_min = int(payload.get("min_workers", 2))
+        legacy_max = int(payload.get("max_workers", legacy_min))
+        workers = max(1, min(6, max(legacy_min, legacy_max)))
+    else:
+        workers = max(1, min(6, int(workers_raw)))
     timeout_sec = int(payload.get("timeout_sec", 300))
     repro_validation_runs = int(payload.get("repro_validation_runs", 5))
     repro_min_matches = int(payload.get("repro_min_matches", 1))
@@ -150,8 +155,7 @@ def launch_run(
         issue_url=issue_url,
         repo_path=Path(repo_path).resolve(),
         runs_root=runs_root.resolve(),
-        min_workers=max(2, min_workers),
-        max_workers=min(6, max(2, max_workers)),
+        workers=workers,
         timeout_sec=max(60, timeout_sec),
         repro_validation_runs=max(1, repro_validation_runs),
         repro_min_matches=max(1, min(repro_min_matches, max(1, repro_validation_runs))),
