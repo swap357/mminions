@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mminions dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap');
+    body { font-family: 'Inter', sans-serif; background: #0a0a0a; color: #e5e5e5; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    .pane-output { font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
+    .scrollbar-thin::-webkit-scrollbar { width: 4px; height: 4px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+    .fade-in { animation: fadeIn 0.2s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { 0: '#0a0a0a', 1: '#111111', 2: '#1a1a1a', 3: '#222222' },
+            accent: { green: '#22c55e', red: '#ef4444', yellow: '#eab308', blue: '#3b82f6', gray: '#6b7280' },
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="h-screen overflow-hidden">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    const API_BASE = window.location.origin;
+    const POLL_MS = 2500;
+
+    // --- API layer ---
+    async function api(path, opts = {}) {
+      const res = await fetch(`${API_BASE}${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+      });
+      return res.json();
+    }
+
+    const fetchHealth = () => api('/health');
+    const fetchRuns = () => api('/api/runs');
+    const fetchStatus = (runId, lines = 120) => api(`/api/runs/${runId}/status?lines=${lines}`);
+    const postLaunch = (payload) => api('/api/runs', { method: 'POST', body: JSON.stringify(payload) });
+    const postStop = (runId) => api(`/api/runs/${runId}/stop`, { method: 'POST' });
+    const postSend = (runId, worker, text) => api(`/api/runs/${runId}/send`, { method: 'POST', body: JSON.stringify({ worker, text }) });
+
+    // --- Status colors ---
+    const STATE_COLORS = {
+      running: 'bg-accent-green', done: 'bg-accent-gray', stopped: 'bg-accent-gray',
+      finished: 'bg-accent-green', failed: 'bg-accent-red', timeout: 'bg-accent-yellow',
+      active: 'bg-accent-blue', unknown: 'bg-accent-gray',
+    };
+    const stateColor = (s) => STATE_COLORS[s] || 'bg-accent-gray';
+    const stateDotColor = (s) => {
+      const map = { running: '#22c55e', done: '#6b7280', stopped: '#6b7280', finished: '#22c55e', failed: '#ef4444', timeout: '#eab308', active: '#3b82f6', unknown: '#6b7280' };
+      return map[s] || '#6b7280';
+    };
+
+    // --- Timeline data model ---
+    // We accumulate events from polling snapshots to build a timeline
+    function useTimeline(status) {
+      const eventsRef = useRef([]);
+      const seenRef = useRef(new Set());
+
+      useEffect(() => {
+        if (!status || !status.workers) return;
+        const now = Date.now();
+        for (const w of status.workers) {
+          const key = `${status.run_id}:${w.worker_id}:${w.status}`;
+          if (!seenRef.current.has(key)) {
+            seenRef.current.add(key);
+            eventsRef.current.push({
+              ts: now,
+              agent: w.worker_id,
+              role: w.role,
+              status: w.status,
+              session_exists: w.session_exists,
+              run_id: status.run_id,
+            });
+          }
+        }
+        // manager
+        const mKey = `${status.run_id}:manager:${status.run_state}`;
+        if (!seenRef.current.has(mKey)) {
+          seenRef.current.add(mKey);
+          eventsRef.current.push({
+            ts: now,
+            agent: 'manager',
+            role: 'MANAGER',
+            status: status.run_state,
+            session_exists: status.manager?.session_exists,
+            run_id: status.run_id,
+          });
+        }
+      }, [status]);
+
+      return eventsRef.current;
+    }
+
+    // --- Flow graph data model ---
+    function useFlowGraph(status) {
+      return useMemo(() => {
+        if (!status || !status.workers) return { nodes: [], edges: [] };
+        const nodes = [];
+        const edges = [];
+
+        nodes.push({ id: 'manager', label: 'Manager', role: 'MANAGER', status: status.run_state, x: 0, y: 0 });
+
+        const workers = status.workers || [];
+        workers.forEach((w, i) => {
+          nodes.push({ id: w.worker_id, label: `${w.worker_id}`, role: w.role, status: w.status, x: 0, y: 0 });
+          edges.push({
+            from: 'manager', to: w.worker_id,
+            status: w.status,
+            label: w.role,
+            active: w.session_exists,
+          });
+        });
+
+        // layout: manager center top, workers in arc below
+        const cx = 300, cy = 60;
+        nodes[0].x = cx;
+        nodes[0].y = cy;
+        const workerCount = workers.length;
+        if (workerCount > 0) {
+          const spread = Math.min(500, workerCount * 120);
+          const startX = cx - spread / 2;
+          workers.forEach((_, i) => {
+            nodes[i + 1].x = startX + (spread / Math.max(1, workerCount - 1)) * i;
+            nodes[i + 1].y = 180;
+          });
+          if (workerCount === 1) {
+            nodes[1].x = cx;
+          }
+        }
+
+        return { nodes, edges };
+      }, [status]);
+    }
+
+    // --- Components ---
+
+    function HealthDot({ healthy }) {
+      return (
+        <div className="flex items-center gap-1.5 text-xs">
+          <div className={`w-2 h-2 rounded-full ${healthy ? 'bg-accent-green pulse-dot' : 'bg-accent-red'}`} />
+          <span className="text-neutral-500">{healthy ? 'connected' : 'disconnected'}</span>
+        </div>
+      );
+    }
+
+    function RunList({ runs, selected, onSelect }) {
+      return (
+        <div className="flex flex-col gap-0.5">
+          {runs.map(r => (
+            <button
+              key={r}
+              onClick={() => onSelect(r)}
+              className={`text-left px-3 py-2 rounded text-xs mono truncate transition-colors ${
+                r === selected ? 'bg-surface-3 text-white' : 'text-neutral-400 hover:bg-surface-2 hover:text-neutral-200'
+              }`}
+            >
+              {r}
+            </button>
+          ))}
+          {runs.length === 0 && <p className="text-neutral-600 text-xs px-3 py-2">no runs</p>}
+        </div>
+      );
+    }
+
+    function SummaryBar({ summary }) {
+      if (!summary) return null;
+      const items = [
+        { label: 'total', value: summary.total, color: 'text-neutral-300' },
+        { label: 'active', value: summary.active, color: 'text-blue-400' },
+        { label: 'finished', value: summary.finished, color: 'text-green-400' },
+        { label: 'failed', value: summary.failed, color: 'text-red-400' },
+        { label: 'timeout', value: summary.timeout, color: 'text-yellow-400' },
+      ];
+      return (
+        <div className="flex gap-4 text-xs">
+          {items.map(i => (
+            <div key={i.label} className="flex items-center gap-1">
+              <span className="text-neutral-500">{i.label}</span>
+              <span className={`mono font-medium ${i.color}`}>{i.value}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function PaneViewer({ title, tail, maxH = 'max-h-48' }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+      }, [tail]);
+      return (
+        <div className="bg-surface-0 rounded border border-neutral-800">
+          <div className="px-3 py-1.5 border-b border-neutral-800 text-xs text-neutral-500">{title}</div>
+          <div ref={ref} className={`p-3 ${maxH} overflow-y-auto scrollbar-thin pane-output text-neutral-300`}>
+            {tail || <span className="text-neutral-600">no output</span>}
+          </div>
+        </div>
+      );
+    }
+
+    function WorkerCard({ worker, runId, onSend }) {
+      const [text, setText] = useState('');
+      const handleSend = () => {
+        if (!text.trim()) return;
+        onSend(runId, worker.worker_id, text.trim());
+        setText('');
+      };
+      return (
+        <div className="bg-surface-2 rounded border border-neutral-800 fade-in">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: stateDotColor(worker.status) }} />
+              <span className="text-sm font-medium mono">{worker.worker_id}</span>
+              <span className="text-xs text-neutral-500 bg-surface-3 px-1.5 py-0.5 rounded">{worker.role}</span>
+            </div>
+            <span className="text-xs text-neutral-500">{worker.status}</span>
+          </div>
+          <PaneViewer title="output" tail={worker.pane_tail} maxH="max-h-32" />
+          {worker.session_exists && (
+            <div className="flex gap-2 p-2 border-t border-neutral-800">
+              <input
+                value={text}
+                onChange={e => setText(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSend()}
+                placeholder="send command..."
+                className="flex-1 bg-surface-0 border border-neutral-700 rounded px-2 py-1 text-xs mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-neutral-500"
+              />
+              <button onClick={handleSend} className="px-3 py-1 bg-surface-3 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors">
+                send
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function LaunchForm({ onLaunch }) {
+      const [open, setOpen] = useState(false);
+      const [form, setForm] = useState({ issue_url: '', repo_path: '', min_workers: 2, max_workers: 6, timeout_sec: 300 });
+      const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        onLaunch(form);
+        setOpen(false);
+      };
+      if (!open) {
+        return (
+          <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-surface-3 hover:bg-neutral-700 rounded text-xs text-neutral-300 transition-colors">
+            + new run
+          </button>
+        );
+      }
+      const inputCls = "w-full bg-surface-0 border border-neutral-700 rounded px-2 py-1.5 text-xs mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-neutral-500";
+      return (
+        <form onSubmit={handleSubmit} className="bg-surface-2 rounded border border-neutral-800 p-4 space-y-3 fade-in">
+          <div className="text-xs text-neutral-400 font-medium mb-2">launch new run</div>
+          <input value={form.issue_url} onChange={e => set('issue_url', e.target.value)} placeholder="issue url" className={inputCls} required />
+          <input value={form.repo_path} onChange={e => set('repo_path', e.target.value)} placeholder="repo path (absolute)" className={inputCls} required />
+          <div className="flex gap-2">
+            <input type="number" value={form.min_workers} onChange={e => set('min_workers', +e.target.value)} placeholder="min workers" className={inputCls} min={2} max={6} />
+            <input type="number" value={form.max_workers} onChange={e => set('max_workers', +e.target.value)} placeholder="max workers" className={inputCls} min={2} max={6} />
+            <input type="number" value={form.timeout_sec} onChange={e => set('timeout_sec', +e.target.value)} placeholder="timeout (s)" className={inputCls} min={60} />
+          </div>
+          <div className="flex gap-2">
+            <button type="submit" className="px-3 py-1.5 bg-accent-green/20 hover:bg-accent-green/30 text-green-400 rounded text-xs transition-colors">launch</button>
+            <button type="button" onClick={() => setOpen(false)} className="px-3 py-1.5 bg-surface-3 hover:bg-neutral-700 rounded text-xs text-neutral-400 transition-colors">cancel</button>
+          </div>
+        </form>
+      );
+    }
+
+    // --- Timeline (Gantt-style) ---
+    function TimelineView({ events }) {
+      const canvasRef = useRef(null);
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas || events.length === 0) return;
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        const W = canvas.parentElement.clientWidth;
+        const agents = [...new Set(events.map(e => e.agent))];
+        const ROW_H = 28;
+        const PAD_L = 80;
+        const PAD_T = 24;
+        const H = PAD_T + agents.length * ROW_H + 16;
+        canvas.width = W * dpr;
+        canvas.height = H * dpr;
+        canvas.style.width = W + 'px';
+        canvas.style.height = H + 'px';
+        ctx.scale(dpr, dpr);
+
+        ctx.fillStyle = '#111111';
+        ctx.fillRect(0, 0, W, H);
+
+        const tMin = Math.min(...events.map(e => e.ts));
+        const tMax = Math.max(...events.map(e => e.ts));
+        const tRange = Math.max(tMax - tMin, 1000);
+        const toX = (t) => PAD_L + ((t - tMin) / tRange) * (W - PAD_L - 16);
+
+        // header
+        ctx.fillStyle = '#555';
+        ctx.font = '10px Inter, sans-serif';
+        ctx.fillText('agent', 8, 14);
+        ctx.fillText('timeline', PAD_L, 14);
+
+        agents.forEach((agent, i) => {
+          const y = PAD_T + i * ROW_H;
+          // label
+          ctx.fillStyle = '#888';
+          ctx.font = '11px JetBrains Mono, monospace';
+          ctx.fillText(agent, 8, y + 18);
+
+          // row line
+          ctx.strokeStyle = '#1a1a1a';
+          ctx.beginPath();
+          ctx.moveTo(PAD_L, y + ROW_H);
+          ctx.lineTo(W - 8, y + ROW_H);
+          ctx.stroke();
+
+          // events for this agent
+          const agentEvents = events.filter(e => e.agent === agent);
+          for (let j = 0; j < agentEvents.length; j++) {
+            const ev = agentEvents[j];
+            const x = toX(ev.ts);
+            const nextTs = j + 1 < agentEvents.length ? agentEvents[j + 1].ts : ev.ts + tRange * 0.05;
+            const x2 = toX(nextTs);
+            const barW = Math.max(x2 - x, 4);
+
+            ctx.fillStyle = stateDotColor(ev.status) + '66';
+            ctx.fillRect(x, y + 6, barW, 16);
+            ctx.fillStyle = stateDotColor(ev.status);
+            ctx.fillRect(x, y + 6, 3, 16);
+
+            // status label
+            ctx.fillStyle = '#ccc';
+            ctx.font = '9px JetBrains Mono, monospace';
+            if (barW > 40) {
+              ctx.fillText(ev.status, x + 8, y + 18);
+            }
+          }
+        });
+      }, [events]);
+
+      if (events.length === 0) {
+        return <div className="text-neutral-600 text-xs p-4">no timeline events yet — data accumulates as you poll</div>;
+      }
+      return (
+        <div className="w-full overflow-x-auto">
+          <canvas ref={canvasRef} />
+        </div>
+      );
+    }
+
+    // --- Flow Graph (SVG) ---
+    function FlowGraph({ graph }) {
+      const { nodes, edges } = graph;
+      if (nodes.length === 0) return <div className="text-neutral-600 text-xs p-4">no flow data</div>;
+
+      const W = 620, H = 260;
+      return (
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 260 }}>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#555" />
+            </marker>
+          </defs>
+          {edges.map((e, i) => {
+            const from = nodes.find(n => n.id === e.from);
+            const to = nodes.find(n => n.id === e.to);
+            if (!from || !to) return null;
+            const color = e.active ? '#3b82f6' : (e.status === 'failed' ? '#ef4444' : e.status === 'finished' ? '#22c55e' : '#444');
+            const thickness = e.active ? 2 : 1.5;
+            return (
+              <g key={i}>
+                <line x1={from.x} y1={from.y + 20} x2={to.x} y2={to.y - 20}
+                  stroke={color} strokeWidth={thickness} markerEnd="url(#arrow)" opacity={0.7} />
+                <text x={(from.x + to.x) / 2 + 8} y={(from.y + to.y) / 2 + 4}
+                  fill="#666" fontSize="9" fontFamily="JetBrains Mono, monospace">{e.label}</text>
+              </g>
+            );
+          })}
+          {nodes.map(n => {
+            const fill = stateDotColor(n.status);
+            return (
+              <g key={n.id}>
+                <rect x={n.x - 36} y={n.y - 16} width={72} height={32} rx={6}
+                  fill="#1a1a1a" stroke={fill} strokeWidth={1.5} />
+                <circle cx={n.x - 22} cy={n.y} r={3} fill={fill} />
+                <text x={n.x - 12} y={n.y + 4} fill="#ddd" fontSize="11" fontFamily="JetBrains Mono, monospace">
+                  {n.label}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      );
+    }
+
+    // --- Tab bar ---
+    function Tabs({ tabs, active, onSelect }) {
+      return (
+        <div className="flex gap-0 border-b border-neutral-800">
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => onSelect(t.id)}
+              className={`px-4 py-2 text-xs transition-colors ${
+                t.id === active ? 'text-neutral-200 border-b-2 border-neutral-400' : 'text-neutral-500 hover:text-neutral-300'
+              }`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    // --- Main App ---
+    function App() {
+      const [healthy, setHealthy] = useState(false);
+      const [runs, setRuns] = useState([]);
+      const [selectedRun, setSelectedRun] = useState(null);
+      const [status, setStatus] = useState(null);
+      const [tab, setTab] = useState('status');
+      const [error, setError] = useState(null);
+
+      const timeline = useTimeline(status);
+      const flowGraph = useFlowGraph(status);
+
+      // poll health + runs
+      useEffect(() => {
+        let alive = true;
+        const poll = async () => {
+          try {
+            const h = await fetchHealth();
+            if (alive) setHealthy(h?.ok === true);
+          } catch { if (alive) setHealthy(false); }
+          try {
+            const r = await fetchRuns();
+            if (alive && r?.runs) {
+              setRuns(r.runs);
+              if (!selectedRun && r.runs.length > 0) setSelectedRun(r.runs[r.runs.length - 1]);
+            }
+          } catch {}
+        };
+        poll();
+        const id = setInterval(poll, POLL_MS);
+        return () => { alive = false; clearInterval(id); };
+      }, []);
+
+      // poll selected run status
+      useEffect(() => {
+        if (!selectedRun) { setStatus(null); return; }
+        let alive = true;
+        const poll = async () => {
+          try {
+            const s = await fetchStatus(selectedRun);
+            if (alive) { setStatus(s); setError(s?.error || null); }
+          } catch (e) { if (alive) setError(e.message); }
+        };
+        poll();
+        const id = setInterval(poll, POLL_MS);
+        return () => { alive = false; clearInterval(id); };
+      }, [selectedRun]);
+
+      const handleStop = async () => {
+        if (!selectedRun) return;
+        await postStop(selectedRun);
+      };
+
+      const handleSend = async (runId, worker, text) => {
+        await postSend(runId, worker, text);
+      };
+
+      const handleLaunch = async (payload) => {
+        try {
+          const res = await postLaunch(payload);
+          if (res?.run_id) setSelectedRun(res.run_id);
+        } catch (e) { setError(e.message); }
+      };
+
+      const tabs = [
+        { id: 'status', label: 'Status' },
+        { id: 'timeline', label: 'Timeline' },
+        { id: 'flow', label: 'Flow Graph' },
+      ];
+
+      return (
+        <div className="h-screen flex flex-col">
+          {/* header */}
+          <header className="flex items-center justify-between px-4 py-3 border-b border-neutral-800 bg-surface-1">
+            <div className="flex items-center gap-3">
+              <h1 className="text-sm font-semibold tracking-tight text-neutral-200">mminions</h1>
+              <span className="text-xs text-neutral-600">dashboard</span>
+            </div>
+            <HealthDot healthy={healthy} />
+          </header>
+
+          <div className="flex flex-1 overflow-hidden">
+            {/* sidebar */}
+            <aside className="w-56 border-r border-neutral-800 bg-surface-1 flex flex-col">
+              <div className="px-3 py-3 border-b border-neutral-800 flex items-center justify-between">
+                <span className="text-xs text-neutral-500 font-medium">runs ({runs.length})</span>
+              </div>
+              <div className="flex-1 overflow-y-auto scrollbar-thin p-1">
+                <RunList runs={runs} selected={selectedRun} onSelect={setSelectedRun} />
+              </div>
+              <div className="p-3 border-t border-neutral-800">
+                <LaunchForm onLaunch={handleLaunch} />
+              </div>
+            </aside>
+
+            {/* main */}
+            <main className="flex-1 flex flex-col overflow-hidden bg-surface-0">
+              {!selectedRun ? (
+                <div className="flex-1 flex items-center justify-center text-neutral-600 text-sm">
+                  select a run or launch a new one
+                </div>
+              ) : (
+                <>
+                  {/* run header */}
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800 bg-surface-1">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-2 h-2 rounded-full ${status?.run_state === 'running' ? 'pulse-dot' : ''}`}
+                        style={{ backgroundColor: stateDotColor(status?.run_state || 'unknown') }} />
+                      <span className="mono text-sm font-medium">{selectedRun}</span>
+                      <span className="text-xs text-neutral-500">{status?.run_state || '...'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {status?.run_state === 'running' && (
+                        <button onClick={handleStop} className="px-3 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded text-xs transition-colors">
+                          stop
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <Tabs tabs={tabs} active={tab} onSelect={setTab} />
+
+                  <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4">
+                    {error && <div className="bg-red-500/10 border border-red-500/20 rounded px-3 py-2 text-xs text-red-400">{error}</div>}
+
+                    {tab === 'status' && status && (
+                      <>
+                        <SummaryBar summary={status.summary} />
+
+                        {/* manager */}
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-xs font-medium text-neutral-400">manager</span>
+                            {status.manager?.issue_url && (
+                              <a href={status.manager.issue_url} target="_blank" rel="noopener noreferrer"
+                                className="text-xs text-blue-400 hover:underline truncate max-w-md">
+                                {status.manager.issue_url}
+                              </a>
+                            )}
+                          </div>
+                          <PaneViewer title={status.manager?.session_name || 'manager'} tail={status.manager?.pane_tail} />
+                        </div>
+
+                        {/* workers */}
+                        <div>
+                          <div className="text-xs font-medium text-neutral-400 mb-2">workers</div>
+                          <div className="space-y-2">
+                            {(status.workers || []).map(w => (
+                              <WorkerCard key={w.worker_id} worker={w} runId={selectedRun} onSend={handleSend} />
+                            ))}
+                            {(!status.workers || status.workers.length === 0) && (
+                              <div className="text-neutral-600 text-xs">no workers</div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* decision */}
+                        {status.decision && Object.keys(status.decision).length > 0 && (
+                          <div>
+                            <div className="text-xs font-medium text-neutral-400 mb-2">decision</div>
+                            <pre className="bg-surface-2 rounded border border-neutral-800 p-3 text-xs mono text-neutral-300 overflow-x-auto">
+                              {JSON.stringify(status.decision, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+
+                        {/* run_done */}
+                        {status.run_done && Object.keys(status.run_done).length > 0 && (
+                          <div>
+                            <div className="text-xs font-medium text-neutral-400 mb-2">run result</div>
+                            <pre className="bg-surface-2 rounded border border-neutral-800 p-3 text-xs mono text-neutral-300 overflow-x-auto">
+                              {JSON.stringify(status.run_done, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {tab === 'timeline' && (
+                      <div>
+                        <div className="text-xs text-neutral-500 mb-3">
+                          agent activity timeline — bars show status transitions observed during polling
+                        </div>
+                        <div className="bg-surface-1 rounded border border-neutral-800">
+                          <TimelineView events={timeline} />
+                        </div>
+                      </div>
+                    )}
+
+                    {tab === 'flow' && (
+                      <div>
+                        <div className="text-xs text-neutral-500 mb-3">
+                          agent flow graph — manager → worker handoffs, colored by status
+                        </div>
+                        <div className="bg-surface-1 rounded border border-neutral-800 p-4">
+                          <FlowGraph graph={flowGraph} />
+                        </div>
+                        <div className="flex gap-4 mt-3 text-xs text-neutral-500">
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> active</span>
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> finished</span>
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" /> failed</span>
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500 inline-block" /> timeout</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </main>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

@@ -10,6 +10,7 @@ import argparse
 import json
 import threading
 from urllib.parse import parse_qs, urlparse
+import mimetypes
 
 from .artifacts import ArtifactStore
 from .command import CommandRunner
@@ -24,6 +25,7 @@ class ServerConfig:
     host: str
     port: int
     capture_lines: int
+    dashboard_dir: Path | None = None
 
 
 def _read_json(path: Path) -> dict | None:
@@ -188,6 +190,11 @@ def send_to_worker(run_id: str, runs_root: Path, tmux: TmuxSupervisor, worker: s
 class StatusHandler(BaseHTTPRequestHandler):
     server_version = "mminions-status/0.1"
 
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._cors_headers()
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/health":
@@ -219,7 +226,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
-        self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+        self._serve_dashboard(parsed.path)
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -266,10 +273,41 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         super().log_message(format, *args)
 
+    def _cors_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_dashboard(self, path: str) -> None:
+        dashboard_dir = getattr(self.server, "dashboard_dir", None)
+        if dashboard_dir is None:
+            self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        rel = path.lstrip("/") or "index.html"
+        if rel == "":
+            rel = "index.html"
+        file_path = (dashboard_dir / rel).resolve()
+        if not str(file_path).startswith(str(dashboard_dir.resolve())):
+            self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+            return
+        if not file_path.is_file():
+            file_path = dashboard_dir / "index.html"
+        if not file_path.is_file():
+            self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        content_type, _ = mimetypes.guess_type(str(file_path))
+        body = file_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type or "application/octet-stream")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -308,6 +346,7 @@ class StatusServer(HTTPServer):
         self.runner = CommandRunner()
         self.tmux = TmuxSupervisor(self.runner, cwd=Path.cwd())
         self.quiet = False
+        self.dashboard_dir = config.dashboard_dir
         super().__init__((config.host, config.port), StatusHandler)
 
 
@@ -318,16 +357,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8088)
     parser.add_argument("--capture-lines", type=int, default=120)
     parser.add_argument("--quiet", action="store_true", default=False)
+    parser.add_argument("--dashboard-dir", default=None, help="path to dashboard static files")
     return parser
 
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    dashboard_dir = None
+    if args.dashboard_dir:
+        dashboard_dir = Path(args.dashboard_dir).resolve()
+    else:
+        default_dashboard = Path(__file__).resolve().parent.parent / "dashboard"
+        if default_dashboard.is_dir():
+            dashboard_dir = default_dashboard
     config = ServerConfig(
         runs_root=Path(args.runs_root).resolve(),
         host=args.host,
         port=args.port,
         capture_lines=max(10, min(500, args.capture_lines)),
+        dashboard_dir=dashboard_dir,
     )
     server = StatusServer(config)
     server.quiet = args.quiet
@@ -335,6 +383,8 @@ def main() -> int:
     started = datetime.now(timezone.utc).isoformat()
     print(f"status server listening on http://{config.host}:{config.port} (started {started})")
     print(f"runs_root={config.runs_root}")
+    if config.dashboard_dir:
+        print(f"dashboard={config.dashboard_dir}")
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
