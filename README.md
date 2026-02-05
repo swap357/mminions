@@ -1,6 +1,6 @@
 # mminions
 
-Minimal orchestrator for bug repro + triage with Codex workers in tmux.
+Manager-first bug repro + triage system with Codex workers in tmux.
 
 ## Requirements
 - Python 3.11+
@@ -8,9 +8,15 @@ Minimal orchestrator for bug repro + triage with Codex workers in tmux.
 - `tmux`
 - `git`
 
-## Run
+## Hierarchy
+1. `orchestrator.manager` is the entrypoint and orchestrator.
+2. Worker sessions (`w1`, `w2`, ...) are executors launched and supervised by manager.
+3. `orchestrator.run` is an optional compatibility launcher that starts manager in a tmux session.
+
+## Manager (entrypoint)
 ```bash
-python3 -m orchestrator.run \
+python3 -m orchestrator.manager \
+  --run-id run-$(date -u +%Y%m%d%H%M%S) \
   --issue-url https://github.com/<owner>/<repo>/issues/<number> \
   --repo-path /absolute/path/to/repo \
   --runs-root /absolute/path/to/runs \
@@ -19,13 +25,16 @@ python3 -m orchestrator.run \
   --timeout-sec 300
 ```
 
-## Manager (direct)
+## Optional launcher
+Use this only if you specifically want a wrapper that creates the manager tmux session for you.
 ```bash
-python3 -m orchestrator.manager \
-  --run-id run-20260205120000 \
+python3 -m orchestrator.run \
   --issue-url https://github.com/<owner>/<repo>/issues/<number> \
   --repo-path /absolute/path/to/repo \
-  --runs-root /absolute/path/to/runs
+  --runs-root /absolute/path/to/runs \
+  --min-workers 2 \
+  --max-workers 6 \
+  --timeout-sec 300
 ```
 
 ## CLI
@@ -169,3 +178,43 @@ Response:
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+## NumPy worktree bug-fix eval
+Offline (PR-gate deterministic):
+```bash
+uv run --with pytest pytest tests/evals/test_numpy_convolve_offline.py tests/evals/test_numpy_convolve_live.py
+```
+
+Live (opt-in, full runtime build + codex fix):
+```bash
+MMINIONS_RUN_LIVE_EVAL=1 \
+uv run --with pytest pytest -m live_eval tests/evals/test_numpy_convolve_live.py
+```
+
+Direct CLI:
+```bash
+python3 -m orchestrator.eval_numpy_convolve \
+  --mode offline \
+  --numpy-repo-path /absolute/path/to/numpy \
+  --runs-root /absolute/path/to/runs
+```
+
+```bash
+python3 -m orchestrator.eval_numpy_convolve \
+  --mode live \
+  --numpy-repo-path /absolute/path/to/numpy \
+  --runs-root /absolute/path/to/runs \
+  --python-version 3.12 \
+  --max-runtime-sec 1800
+```
+
+Eval artifacts:
+`runs/<eval_run_id>/`
+- `metadata.json`
+- `before_oracle.json`
+- `after_oracle.json` (live mode)
+- `reference_oracle.json` (live mode)
+- `codex_output.txt` (live mode)
+- `candidate.patch` (live mode)
+- `candidate_patch_validation.json` (live mode)
+- `summary.json`
