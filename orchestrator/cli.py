@@ -2,33 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
-import json
 import os
 
 from .artifacts import ArtifactStore
 from .command import CommandRunner
+from .sessions import require_sessions, resolve_session_name
 from .tmux_supervisor import TmuxSupervisor
-
-
-def _load_sessions(run_id: str, runs_root: Path) -> dict:
-    store = ArtifactStore(runs_root, run_id)
-    path = store.paths.sessions_json
-    if not path.exists():
-        raise FileNotFoundError(f"run not found or missing sessions file: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _resolve_session_name(sessions: dict, worker: str) -> str:
-    if worker == "manager":
-        return sessions.get("manager", {}).get("session_name", "")
-    worker_meta = sessions.get("workers", {}).get(worker, {})
-    return worker_meta.get("session_name", "")
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     runs_root = Path(args.runs_root).resolve()
     try:
-        sessions = _load_sessions(args.run_id, runs_root)
+        sessions = require_sessions(args.run_id, runs_root)
     except FileNotFoundError as exc:
         print(str(exc))
         return 1
@@ -52,11 +37,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_attach(args: argparse.Namespace) -> int:
     runs_root = Path(args.runs_root).resolve()
     try:
-        sessions = _load_sessions(args.run_id, runs_root)
+        sessions = require_sessions(args.run_id, runs_root)
     except FileNotFoundError as exc:
         print(str(exc))
         return 1
-    session_name = _resolve_session_name(sessions, args.worker)
+    session_name = resolve_session_name(sessions, args.worker)
     if not session_name:
         print(f"unknown worker: {args.worker}")
         return 1
@@ -67,11 +52,11 @@ def cmd_attach(args: argparse.Namespace) -> int:
 def cmd_send(args: argparse.Namespace) -> int:
     runs_root = Path(args.runs_root).resolve()
     try:
-        sessions = _load_sessions(args.run_id, runs_root)
+        sessions = require_sessions(args.run_id, runs_root)
     except FileNotFoundError as exc:
         print(str(exc))
         return 1
-    session_name = _resolve_session_name(sessions, args.worker)
+    session_name = resolve_session_name(sessions, args.worker)
     if not session_name:
         print(f"unknown worker: {args.worker}")
         return 1
@@ -87,7 +72,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     runs_root = Path(args.runs_root).resolve()
     store = ArtifactStore(runs_root, args.run_id)
     try:
-        sessions = _load_sessions(args.run_id, runs_root)
+        sessions = require_sessions(args.run_id, runs_root)
     except FileNotFoundError:
         sessions = {"manager": {}, "workers": {}}
     runner = CommandRunner()

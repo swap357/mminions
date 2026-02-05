@@ -36,6 +36,19 @@ python3 -m orchestrator.cli send --run-id <run_id> --worker w1 --text "status" -
 python3 -m orchestrator.cli stop --run-id <run_id> --runs-root /absolute/path/to/runs
 ```
 
+## Status API server
+```bash
+python3 -m orchestrator.server --runs-root /absolute/path/to/runs --host 127.0.0.1 --port 8088
+```
+
+Endpoints:
+- `GET /health`
+- `GET /api/runs`
+- `GET /api/runs/<run_id>/status?lines=120`
+- `POST /api/runs`
+- `POST /api/runs/<run_id>/stop`
+- `POST /api/runs/<run_id>/send`
+
 ## Artifacts
 `runs/<run_id>/`
 - `issue.json`
