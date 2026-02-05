@@ -19,6 +19,11 @@ class LauncherConfig:
     min_workers: int
     max_workers: int
     timeout_sec: int
+    repro_validation_runs: int
+    repro_min_matches: int
+    validation_python_version: str
+    worker_model: str
+    manager_model: str
     detach: bool
 
 
@@ -48,7 +53,12 @@ def launch_manager(config: LauncherConfig) -> tuple[str, Path]:
         f"--runs-root {shlex.quote(str(runs_root))} "
         f"--min-workers {config.min_workers} "
         f"--max-workers {config.max_workers} "
-        f"--timeout-sec {config.timeout_sec}"
+        f"--timeout-sec {config.timeout_sec} "
+        f"--repro-validation-runs {config.repro_validation_runs} "
+        f"--repro-min-matches {config.repro_min_matches} "
+        f"--validation-python-version {shlex.quote(config.validation_python_version)} "
+        f"--worker-model {shlex.quote(config.worker_model)} "
+        f"--manager-model {shlex.quote(config.manager_model)}"
     )
 
     runner = CommandRunner()
@@ -80,6 +90,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-workers", type=int, default=2)
     parser.add_argument("--max-workers", type=int, default=6)
     parser.add_argument("--timeout-sec", type=int, default=300)
+    parser.add_argument("--repro-validation-runs", type=int, default=5)
+    parser.add_argument("--repro-min-matches", type=int, default=1)
+    parser.add_argument("--validation-python-version", default="3.12")
+    parser.add_argument("--worker-model", default="")
+    parser.add_argument("--manager-model", default="")
     parser.add_argument("--detach", action="store_true", default=False)
     return parser
 
@@ -93,6 +108,11 @@ def main() -> int:
         min_workers=max(2, args.min_workers),
         max_workers=min(6, max(2, args.max_workers)),
         timeout_sec=max(60, args.timeout_sec),
+        repro_validation_runs=max(1, args.repro_validation_runs),
+        repro_min_matches=max(1, min(args.repro_min_matches, max(1, args.repro_validation_runs))),
+        validation_python_version=str(args.validation_python_version).strip() or "3.12",
+        worker_model=str(args.worker_model).strip(),
+        manager_model=str(args.manager_model).strip(),
         detach=args.detach,
     )
 

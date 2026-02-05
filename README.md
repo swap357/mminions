@@ -13,6 +13,8 @@ Manager-first bug repro + triage system with Codex workers in tmux.
 2. Worker sessions (`w1`, `w2`, ...) are executors launched and supervised by manager.
 3. `orchestrator.run` is an optional compatibility launcher that starts manager in a tmux session.
 
+Role details: [`docs/responsibilities.md`](docs/responsibilities.md)
+
 ```mermaid
 flowchart TD
     O["Orchestrator (launcher)"] --> M["Manager session (tmux)"]
@@ -31,6 +33,13 @@ flowchart TD
 ```
 
 ## Manager (entrypoint)
+Simple (uses defaults from `mminions.toml`):
+```bash
+python3 -m orchestrator.manager \
+  --issue-url https://github.com/numpy/numpy/issues/30272
+```
+
+Explicit (override defaults):
 ```bash
 python3 -m orchestrator.manager \
   --run-id run-$(date -u +%Y%m%d%H%M%S) \
@@ -41,6 +50,18 @@ python3 -m orchestrator.manager \
   --max-workers 6 \
   --timeout-sec 300
 ```
+
+Advanced configuration:
+- Edit [`mminions.toml`](mminions.toml).
+- Or pass a custom config file with `--config /absolute/path/to/mminions.toml`.
+- Model routing:
+  - `worker_model` for repro/triage workers (fast model recommended).
+  - `manager_model` for manager-side semantic reduction (reasoning model recommended).
+  - For ChatGPT Codex accounts, `gpt-5` and `gpt-5.2-codex` are supported. `gpt-5-mini` is not supported.
+
+Manager output includes run metrics:
+- `metrics.timing_sec` for phase and total durations.
+- `metrics.tokens` aggregated from Codex JSON telemetry (`workers`, `manager`, and `total`).
 
 ## Optional launcher
 Use this only if you specifically want a wrapper that creates the manager tmux session for you.

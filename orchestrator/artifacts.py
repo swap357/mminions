@@ -20,6 +20,7 @@ class ArtifactPaths:
     run_done_json: Path
     prompts_dir: Path
     scripts_dir: Path
+    telemetry_dir: Path
 
 
 class ArtifactStore:
@@ -43,6 +44,7 @@ class ArtifactStore:
             run_done_json=run_dir / "run_done.json",
             prompts_dir=run_dir / "prompts",
             scripts_dir=run_dir / "scripts",
+            telemetry_dir=run_dir / "telemetry",
         )
 
     def initialize_contract(self) -> ArtifactPaths:
@@ -51,6 +53,7 @@ class ArtifactStore:
         p.triage_dir.mkdir(parents=True, exist_ok=True)
         p.prompts_dir.mkdir(parents=True, exist_ok=True)
         p.scripts_dir.mkdir(parents=True, exist_ok=True)
+        p.telemetry_dir.mkdir(parents=True, exist_ok=True)
         placeholder_repro = self.minimal_repro_path("txt")
 
         self.write_json(p.issue_json, {})

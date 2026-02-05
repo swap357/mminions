@@ -140,6 +140,11 @@ def launch_run(
     min_workers = int(payload.get("min_workers", 2))
     max_workers = int(payload.get("max_workers", 6))
     timeout_sec = int(payload.get("timeout_sec", 300))
+    repro_validation_runs = int(payload.get("repro_validation_runs", 5))
+    repro_min_matches = int(payload.get("repro_min_matches", 1))
+    validation_python_version = str(payload.get("validation_python_version", "3.12")).strip() or "3.12"
+    worker_model = str(payload.get("worker_model", "")).strip()
+    manager_model = str(payload.get("manager_model", "")).strip()
 
     config = LauncherConfig(
         issue_url=issue_url,
@@ -148,6 +153,11 @@ def launch_run(
         min_workers=max(2, min_workers),
         max_workers=min(6, max(2, max_workers)),
         timeout_sec=max(60, timeout_sec),
+        repro_validation_runs=max(1, repro_validation_runs),
+        repro_min_matches=max(1, min(repro_min_matches, max(1, repro_validation_runs))),
+        validation_python_version=validation_python_version,
+        worker_model=worker_model,
+        manager_model=manager_model,
         detach=True,
     )
     run_id, run_done_json = launcher(config)

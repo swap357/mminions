@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 import json
+import re
+import shlex
 
 from .command import CommandRunner
 from .types import FailureSignal, IssueSpec, ReproCandidate, ValidationResult
@@ -61,12 +63,15 @@ def validate_candidate(
     candidate_script_path: Path,
     command_runner: CommandRunner,
     runs: int = 5,
+    min_matches: int = 3,
+    python_executable: str | None = None,
     timeout_sec: int = 30,
 ) -> ValidationResult:
     candidate_script_path.write_text(candidate.script, encoding="utf-8")
 
     for setup_cmd in candidate.setup_commands:
         rendered_setup = setup_cmd.replace("{repro_file}", str(candidate_script_path))
+        rendered_setup = _render_python_command(rendered_setup, python_executable)
         setup_result = command_runner.run_shell(rendered_setup, cwd=repo_path, timeout_sec=timeout_sec)
         if setup_result.returncode != 0:
             return ValidationResult(
@@ -79,12 +84,14 @@ def validate_candidate(
     matches = 0
     for _ in range(runs):
         oracle_cmd = candidate.oracle_command.replace("{repro_file}", str(candidate_script_path))
+        oracle_cmd = _render_python_command(oracle_cmd, python_executable)
         run_result = command_runner.run_shell(oracle_cmd, cwd=repo_path, timeout_sec=timeout_sec)
         output = f"{run_result.stdout}\n{run_result.stderr}"
         if _signature_matches(output, candidate.claimed_failure_signature, issue_spec.expected_failure_signals):
             matches += 1
 
-    passed = matches >= 4
+    required_matches = max(1, min(min_matches, runs))
+    passed = matches >= required_matches
     return ValidationResult(
         total_runs=runs,
         matches=matches,
@@ -158,6 +165,8 @@ def semantic_reduce_script(
     command_runner: CommandRunner,
     repo_path: Path,
     output_path: Path,
+    model: str = "",
+    telemetry_jsonl_path: Path | None = None,
 ) -> str:
     prompt = (
         "You are minimizing a bug reproducer. Return only code.\n"
@@ -170,11 +179,15 @@ def semantic_reduce_script(
         "```\n"
     )
 
-    result = command_runner.run(
+    args = [
+        "codex",
+        "exec",
+        prompt,
+    ]
+    if model.strip():
+        args.extend(["-m", model.strip()])
+    args.extend(
         [
-            "codex",
-            "exec",
-            prompt,
             "-s",
             "read-only",
             "--skip-git-repo-check",
@@ -182,10 +195,13 @@ def semantic_reduce_script(
             str(repo_path),
             "-o",
             str(output_path),
-        ],
-        cwd=repo_path,
-        timeout_sec=120,
+            "--json",
+        ]
     )
+    result = command_runner.run(args, cwd=repo_path, timeout_sec=120)
+    if telemetry_jsonl_path is not None:
+        telemetry_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        telemetry_jsonl_path.write_text(result.stdout or "", encoding="utf-8")
     if result.returncode != 0 or not output_path.exists():
         return script
 
@@ -230,6 +246,10 @@ def minimize_candidate(
     command_runner: CommandRunner,
     semantic_output_path: Path,
     minimal_output_path: Path,
+    min_matches: int = 3,
+    python_executable: str | None = None,
+    model: str = "",
+    telemetry_jsonl_path: Path | None = None,
     timeout_sec: int = 30,
 ) -> ReproCandidate:
     semantic_script = semantic_reduce_script(
@@ -238,6 +258,8 @@ def minimize_candidate(
         command_runner=command_runner,
         repo_path=repo_path,
         output_path=semantic_output_path,
+        model=model,
+        telemetry_jsonl_path=telemetry_jsonl_path,
     )
 
     base_script = semantic_script if semantic_script.strip() else candidate.script
@@ -253,6 +275,8 @@ def minimize_candidate(
             candidate_script_path=minimal_output_path,
             command_runner=command_runner,
             runs=5,
+            min_matches=min_matches,
+            python_executable=python_executable,
             timeout_sec=timeout_sec,
         )
         return validation.passed
@@ -267,7 +291,17 @@ def minimize_candidate(
         candidate_script_path=minimal_output_path,
         command_runner=command_runner,
         runs=5,
+        min_matches=min_matches,
+        python_executable=python_executable,
         timeout_sec=timeout_sec,
     )
 
     return replace(candidate, script=minimized_script, validation=validated)
+
+
+def _render_python_command(command: str, python_executable: str | None) -> str:
+    if not python_executable:
+        return command
+    python_token = shlex.quote(python_executable)
+    rendered = command.replace("{python}", python_token)
+    return re.sub(r"(?<![\\w/.-])python(?![\\w/.-])", python_token, rendered)

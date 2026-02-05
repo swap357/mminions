@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import shlex
 
 from .types import IssueSpec
 
@@ -116,15 +117,24 @@ def build_codex_exec_script(
     output_path: Path,
     script_path: Path,
     worktree_path: Path,
+    model: str = "",
+    telemetry_path: Path | None = None,
 ) -> None:
     prompt_path = script_path.with_suffix(".prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
+    model_arg = f"-m {shlex.quote(model)} " if model.strip() else ""
+    telemetry_assign = ""
+    telemetry_sink = ""
+    if telemetry_path is not None:
+        telemetry_assign = f"TELEMETRY_FILE={telemetry_path}\n"
+        telemetry_sink = '--json > "$TELEMETRY_FILE"'
     script = f"""#!/usr/bin/env zsh
 set -euo pipefail
 PROMPT_FILE={prompt_path}
 OUTPUT_FILE={output_path}
+{telemetry_assign}
 cd {worktree_path}
-codex exec "$(cat \"$PROMPT_FILE\")" -s read-only --skip-git-repo-check -C {worktree_path} -o "$OUTPUT_FILE"
+codex exec "$(cat \"$PROMPT_FILE\")" {model_arg}-s read-only --skip-git-repo-check -C {worktree_path} -o "$OUTPUT_FILE" {telemetry_sink}
 """
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o755)

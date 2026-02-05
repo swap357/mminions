@@ -11,6 +11,7 @@ from orchestrator.types import FailureSignal, IssueSpec, ReproCandidate, Validat
 class FakeCommandRunner:
     def __init__(self) -> None:
         self.oracle_calls = 0
+        self.commands: list[str] = []
 
     def run(self, args, cwd, timeout_sec=None, check=False):
         class Output:
@@ -23,6 +24,7 @@ class FakeCommandRunner:
 
     def run_shell(self, command, cwd, timeout_sec=None, check=False):
         self.oracle_calls += 1
+        self.commands.append(command)
 
         class Output:
             def __init__(self, stdout: str, stderr: str, returncode: int):
@@ -38,6 +40,26 @@ class FakeCommandRunner:
         script_text = repro_path.read_text(encoding="utf-8") if repro_path and repro_path.exists() else ""
 
         if "ESSENTIAL" in script_text:
+            return Output("ZeroDivisionError", "", 1)
+        return Output("", "no failure", 0)
+
+
+class PartialMatchRunner(FakeCommandRunner):
+    def __init__(self, matches_before_fail: int) -> None:
+        super().__init__()
+        self.matches_before_fail = matches_before_fail
+
+    def run_shell(self, command, cwd, timeout_sec=None, check=False):
+        self.oracle_calls += 1
+        self.commands.append(command)
+
+        class Output:
+            def __init__(self, stdout: str, stderr: str, returncode: int):
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        if self.oracle_calls <= self.matches_before_fail:
             return Output("ZeroDivisionError", "", 1)
         return Output("", "no failure", 0)
 
@@ -93,6 +115,40 @@ class ReproTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.matches, 5)
 
+    def test_validate_candidate_uses_configurable_min_matches(self) -> None:
+        issue_spec = IssueSpec(
+            issue_url="https://github.com/org/repo/issues/1",
+            repo_slug="org/repo",
+            issue_number=1,
+            title="ZeroDivisionError in parser",
+            body="",
+            expected_failure_signals=[FailureSignal(exception_type="ZeroDivisionError")],
+        )
+        candidate = ReproCandidate(
+            candidate_id="w1-candidate",
+            worker_id="w1",
+            script="print('x')\n",
+            setup_commands=[],
+            oracle_command="python {repro_file}",
+            claimed_failure_signature="ZeroDivisionError",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner = PartialMatchRunner(matches_before_fail=3)
+            result = validate_candidate(
+                candidate=candidate,
+                issue_spec=issue_spec,
+                repo_path=Path(temp_dir),
+                candidate_script_path=Path(temp_dir) / "cand.py",
+                command_runner=runner,
+                runs=5,
+                min_matches=3,
+                timeout_sec=5,
+            )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.matches, 3)
+
     def test_choose_best_candidate(self) -> None:
         issue_spec = IssueSpec(
             issue_url="https://github.com/org/repo/issues/1",
@@ -124,6 +180,41 @@ class ReproTests(unittest.TestCase):
         best = choose_best_candidate([c2, c1], issue_spec)
         self.assertIsNotNone(best)
         self.assertEqual(best.candidate_id, "c1")
+
+    def test_validate_candidate_rewrites_python_command(self) -> None:
+        issue_spec = IssueSpec(
+            issue_url="https://github.com/org/repo/issues/1",
+            repo_slug="org/repo",
+            issue_number=1,
+            title="ZeroDivisionError in parser",
+            body="",
+            expected_failure_signals=[FailureSignal(exception_type="ZeroDivisionError")],
+        )
+        candidate = ReproCandidate(
+            candidate_id="c1",
+            worker_id="w1",
+            script="print('ESSENTIAL')\n",
+            setup_commands=["python -m pip install numpy"],
+            oracle_command="python {repro_file}",
+            claimed_failure_signature="ZeroDivisionError",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner = FakeCommandRunner()
+            result = validate_candidate(
+                candidate=candidate,
+                issue_spec=issue_spec,
+                repo_path=Path(temp_dir),
+                candidate_script_path=Path(temp_dir) / "cand.py",
+                command_runner=runner,
+                runs=1,
+                min_matches=1,
+                python_executable="/tmp/venv/bin/python",
+                timeout_sec=5,
+            )
+
+        self.assertTrue(result.passed)
+        self.assertTrue(any(command.startswith("/tmp/venv/bin/python ") for command in runner.commands))
 
     def test_minimize_candidate_keeps_essential_line(self) -> None:
         issue_spec = IssueSpec(
