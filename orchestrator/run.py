@@ -73,7 +73,7 @@ def wait_for_run_done(run_done_json: Path, timeout_sec: int) -> bool:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Launch mminions orchestrator run")
+    parser = argparse.ArgumentParser(description="Compatibility launcher: start manager in tmux")
     parser.add_argument("--issue-url", required=True)
     parser.add_argument("--repo-path", required=True)
     parser.add_argument("--runs-root", default="runs")
