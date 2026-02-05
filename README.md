@@ -49,6 +49,111 @@ Endpoints:
 - `POST /api/runs/<run_id>/stop`
 - `POST /api/runs/<run_id>/send`
 
+### API formats
+
+`GET /health`
+Response:
+```json
+{
+  "ok": true
+}
+```
+
+`GET /api/runs`
+Response:
+```json
+{
+  "runs": ["run-20260205123000", "run-20260205124500"],
+  "count": 2
+}
+```
+
+`GET /api/runs/<run_id>/status?lines=120`
+Response:
+```json
+{
+  "run_id": "run-20260205123000",
+  "run_state": "running",
+  "manager": {
+    "session_name": "codorch-run-20260205123000-manager",
+    "session_exists": true,
+    "pane_tail": "last output lines...",
+    "issue_url": "https://github.com/<owner>/<repo>/issues/<number>"
+  },
+  "workers": [
+    {
+      "worker_id": "w1",
+      "role": "REPRO_BUILDER",
+      "status": "finished",
+      "session_name": "codorch-run-20260205123000-w1",
+      "session_exists": false,
+      "worktree_path": "/tmp/mminions-run-20260205123000-w1",
+      "output_path": "/absolute/path/to/runs/run-20260205123000/repro/candidates/w1.json",
+      "script_path": "/absolute/path/to/runs/run-20260205123000/scripts/repro-w1.sh",
+      "pane_tail": ""
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "active": 0,
+    "finished": 1,
+    "failed": 0,
+    "timeout": 0,
+    "unknown": 0
+  },
+  "decision": {
+    "status": "running"
+  },
+  "run_done": {}
+}
+```
+
+`POST /api/runs`
+Request:
+```json
+{
+  "issue_url": "https://github.com/<owner>/<repo>/issues/<number>",
+  "repo_path": "/absolute/path/to/repo",
+  "min_workers": 2,
+  "max_workers": 6,
+  "timeout_sec": 300
+}
+```
+Response:
+```json
+{
+  "run_id": "run-20260205123000",
+  "run_done": "/absolute/path/to/runs/run-20260205123000/run_done.json",
+  "manager_session": "codorch-run-20260205123000-manager"
+}
+```
+
+`POST /api/runs/<run_id>/stop`
+Response:
+```json
+{
+  "run_id": "run-20260205123000",
+  "status": "stopped"
+}
+```
+
+`POST /api/runs/<run_id>/send`
+Request:
+```json
+{
+  "worker": "w1",
+  "text": "status"
+}
+```
+Response:
+```json
+{
+  "run_id": "run-20260205123000",
+  "worker": "w1",
+  "sent": true
+}
+```
+
 ## Artifacts
 `runs/<run_id>/`
 - `issue.json`
