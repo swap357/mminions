@@ -1,0 +1,4 @@
+interface:
+  display_name: "ExecPlan Execute"
+  short_description: "Run an ExecPlan milestone by milestone safely"
+  default_prompt: "Use $execplan-execute to execute this ExecPlan and log progress in the plan."
