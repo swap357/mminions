@@ -1,4 +1,0 @@
-interface:
-  display_name: "ExecPlan Generate"
-  short_description: "Draft milestone-based ExecPlans for Codex runs"
-  default_prompt: "Use $execplan-generate to create an ExecPlan for this task before implementation."
